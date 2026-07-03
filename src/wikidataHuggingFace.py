@@ -100,6 +100,7 @@ class WikidataHFDatasetPublisher:
 
                 remote_base = (self.data_dir or "data").rstrip("/")
                 remote_file = f"{remote_base}/chunk_{self.chunk_idx}.parquet"
+                sleep_time = 1
                 while True:
                     try:
                         api.upload_file(
@@ -112,7 +113,8 @@ class WikidataHFDatasetPublisher:
                         break
                     except Exception:
                         traceback.print_exc()
-                        sleep(1)
+                        sleep(sleep_time)
+                        sleep_time *= 2
 
                 self.chunk_idx += 1
             except Exception:
