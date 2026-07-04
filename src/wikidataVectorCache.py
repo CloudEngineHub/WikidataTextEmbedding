@@ -177,29 +177,36 @@ def get_db_connection(lang="en", entity_type="items", data_dir="../data/Wikidata
             """
             Iterate vectors in deterministic batches.
             """
-            with Session() as session:
-                query = session.query(VectorCache).order_by(VectorCache.id).yield_per(batch_size)
-                batch = []
+            cursor = ""
+            while True:
+                with Session() as session:
+                    rows = session.execute(
+                        text(
+                            "SELECT id, vector, lang, wdid, last_updated "
+                            "FROM vectors WHERE id > :cursor ORDER BY id LIMIT :limit"
+                        ),
+                        {"cursor": cursor, "limit": batch_size},
+                    ).mappings().all()
 
-                for row in query:
-                    last_updated = row.last_updated
+                if not rows:
+                    break
+
+                batch = []
+                for row in rows:
+                    last_updated = row["last_updated"]
                     if isinstance(last_updated, datetime):
                         last_updated = last_updated.isoformat()
 
                     batch.append({
-                        "id": row.id,
-                        "vector": row.vector,
-                        "lang": row.lang,
-                        "wdid": row.wdid,
+                        "id": row["id"],
+                        "vector": row["vector"],
+                        "lang": row["lang"],
+                        "wdid": row["wdid"],
                         "last_updated": last_updated,
                     })
 
-                    if len(batch) >= batch_size:
-                        yield batch
-                        batch = []
-
-                if batch:
-                    yield batch
+                yield batch
+                cursor = batch[-1]["id"]
 
 
     # Create tables if they don't already exist.
