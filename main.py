@@ -31,6 +31,7 @@ JINA_API_PATH = os.environ.get("JINA_API_PATH", "./API_tokens/jina_api.json")
 ASTRA_API_PATH = os.environ.get("ASTRA_API_PATH", "./API_tokens/datastax_api.json")
 WD_HF_API_PATH = os.environ.get("WD_HF_API_PATH", "./API_tokens/wd_hf_api.json")
 VECTORS_HF_API_PATH = os.environ.get("VECTORS_HF_API_PATH", "./API_tokens/vectors_hf_api.json")
+HF_DATA_DIR = os.environ.get("HF_DATA_DIR", "data")
 HF_CHUNK_SIZE = int(os.environ.get("HF_CHUNK_SIZE", 1000))
 HF_BATCH_SIZE = int(os.environ.get("HF_BATCH_SIZE", 32))
 HF_QUEUE_SIZE = int(os.environ.get("HF_QUEUE_SIZE", 128))
@@ -331,7 +332,7 @@ def run_wd_to_hf_stage():
         storage_chunk_size=HF_CHUNK_SIZE,
         memory_chunk_size=HF_BATCH_SIZE,
         queue_size=HF_QUEUE_SIZE,
-        data_dir=f"data/{LANG}",
+        data_dir=HF_DATA_DIR,
     )
 
     try:
@@ -352,7 +353,7 @@ def run_wd_to_hf_stage():
     stage_stats = STATS_TRACKER.read_counters(counters)
     stage_stats.update({
         "branch": HF_BRANCH,
-        "data_dir": f"data/{LANG}",
+        "data_dir": HF_DATA_DIR,
         "entities_processed": int(reader.iterations.value),
         "handler_errors": int(reader.handler_errors.value),
     })
@@ -472,7 +473,7 @@ def run_vectors_to_hf_stage():
             storage_chunk_size=HF_CHUNK_SIZE,
             memory_chunk_size=HF_BATCH_SIZE,
             queue_size=HF_QUEUE_SIZE,
-            data_dir=f"data/{LANG}",
+            data_dir=f"{HF_DATA_DIR}/{LANG}",
         )
         vectors_pushed = 0
         try:
@@ -484,7 +485,7 @@ def run_vectors_to_hf_stage():
             HF_PUBLISHER.flush()
         lang_stats["vectors_to_hf"] = {
             "branch": VECTOR_HF_BRANCH,
-            "data_dir": f"data/{LANG}",
+            "data_dir": f"{HF_DATA_DIR}/{LANG}",
             "rows_pushed": int(vectors_pushed),
         }
 
