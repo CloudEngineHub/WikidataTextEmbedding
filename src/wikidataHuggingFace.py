@@ -1,6 +1,7 @@
 import orjson
 import json
 import os
+import re
 import traceback
 import tempfile
 from time import sleep
@@ -9,6 +10,7 @@ from queue import Full
 from huggingface_hub import HfApi, CommitOperationDelete
 import pyarrow as pa
 import pyarrow.parquet as pq
+from src.hfUploadCheckpoint import HFUploadCheckpoint
 
 
 class WikidataHFDatasetPublisher:
@@ -49,8 +51,16 @@ class WikidataHFDatasetPublisher:
         if not self.repo_id:
             raise ValueError("Hugging Face repository ID not found.")
 
-        self.chunk_idx = 0
         self.create_new_branch()
+        self.checkpoint = HFUploadCheckpoint(
+            branch=self.branch,
+        )
+        self.chunk_idx = self._next_remote_chunk_idx()
+        print(
+            f"HF checkpoint: {self.checkpoint.path} "
+            f"(next chunk {self.chunk_idx})",
+            flush=True,
+        )
 
         self.uploader = Process(
             target=self._publish_records,
@@ -82,6 +92,22 @@ class WikidataHFDatasetPublisher:
 
         return True
 
+    def _next_remote_chunk_idx(self):
+        api = HfApi(token=self.token)
+        remote_base = (self.data_dir or "data").rstrip("/")
+        pattern = re.compile(rf"^{re.escape(remote_base)}/chunk_(\d+)\.parquet$")
+        files = api.list_repo_files(
+            repo_id=self.repo_id,
+            repo_type="dataset",
+            revision=self.branch,
+        )
+        chunk_indices = [
+            int(match.group(1))
+            for f in files
+            if (match := pattern.match(f))
+        ]
+        return max(chunk_indices, default=-1) + 1
+
     def _publish_records(self):
         api = HfApi(token=self.token)
         while True:
@@ -91,7 +117,7 @@ class WikidataHFDatasetPublisher:
             num_records = 0
             reached_end = False
             try:
-                num_records, reached_end = self._write_chunk_parquet(chunk_path)
+                num_records, reached_end, chunk_ids = self._write_chunk_parquet(chunk_path)
 
                 if num_records == 0:
                     if reached_end:
@@ -114,8 +140,9 @@ class WikidataHFDatasetPublisher:
                     except Exception:
                         traceback.print_exc()
                         sleep(sleep_time)
-                        sleep_time *= 2
+                        sleep_time = min(sleep_time * 2, 30)
 
+                self.checkpoint.add_ids(chunk_ids)
                 self.chunk_idx += 1
             except Exception:
                 traceback.print_exc()
@@ -129,9 +156,10 @@ class WikidataHFDatasetPublisher:
             if reached_end:
                 break
 
-    def _write_chunk_parquet(self, chunk_path: str) -> tuple[int, bool]:
+    def _write_chunk_parquet(self, chunk_path: str) -> tuple[int, bool, list[str]]:
         num_records = 0
         reached_end = False
+        chunk_ids = []
         writer = None
         batch_rows = []
         schema = None
@@ -151,6 +179,7 @@ class WikidataHFDatasetPublisher:
                     continue
 
                 batch_rows.append(row)
+                chunk_ids.append(row.get("id") or "")
                 num_records += 1
                 if len(batch_rows) >= self.memory_chunk_size:
                     table = pa.Table.from_pylist(batch_rows, schema=schema)
@@ -179,7 +208,10 @@ class WikidataHFDatasetPublisher:
             if writer is not None:
                 writer.close()
 
-        return num_records, reached_end
+        return num_records, reached_end, chunk_ids
+
+    def existing_ids(self, ids: list[str]) -> set[str]:
+        return self.checkpoint.existing_ids(ids)
 
     def flush(self) -> int:
         """
