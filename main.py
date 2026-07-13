@@ -4,7 +4,11 @@ from WikidataTextifier.src import JSONNormalizer, LazyLabelFactory, WikidataLabe
 
 from src.JinaAI import JinaAIAPIEmbedder, JinaAITokenizer
 from src.WikidataDumpReader import WikidataDumpReader
-from src.WikidataFilter import WikidataItemFilter, WikidataPropertyFilter
+from src.WikidataFilter import (
+    WikidataItemFilter,
+    WikidataPropertyFilter,
+    WikidataScholarlyArticleFilter,
+)
 from src.WikidataJSONCleaner import WikidataJSONCleaner
 from src.utils import (
     check_wdtextifier_stack,
@@ -59,6 +63,7 @@ VECTOR_EMBEDDER = None
 VECTORCACHE = None
 ASTRADB = None
 HF_PUBLISHER = None
+WD_HF_SCHOLARLY_FILTER = None
 LABEL_DB_READY = False
 dump_reader = None
 STATS_TRACKER = None
@@ -139,8 +144,34 @@ def item_to_text(item, label_factory=None):
 
 # ---- Sink steps ----
 def push_to_hf(items, label_factory=None):
+    global WD_HF_SCHOLARLY_FILTER
+
     if HF_PUBLISHER is None:
         raise RuntimeError("HF publisher is not initialized in this process.")
+
+    existing_ids = HF_PUBLISHER.existing_ids([item["id"] for item in items if item])
+    if existing_ids:
+        items = [item for item in items if item and item["id"] not in existing_ids]
+        if STATS_TRACKER is not None:
+            STATS_TRACKER.counter_add("wd_hf_skipped_existing", len(existing_ids))
+    if not items:
+        return 0
+
+    if WD_HF_SCHOLARLY_FILTER is None:
+        WD_HF_SCHOLARLY_FILTER = WikidataScholarlyArticleFilter(
+            lang=LANG,
+            fallback_lang=FALLBACK_LANG,
+        )
+    before_filter = len(items)
+    items = [
+        item
+        for item in items
+        if WD_HF_SCHOLARLY_FILTER.not_scholarly_article(item)
+    ]
+    if STATS_TRACKER is not None:
+        STATS_TRACKER.counter_add("wd_hf_skipped_scholarly", before_filter - len(items))
+    if not items:
+        return 0
 
     if label_factory is None:
         label_factory = LazyLabelFactory(lang=LANG, fallback_lang=FALLBACK_LANG)
@@ -274,11 +305,13 @@ def create_dump_reader():
 
 def reset_runtime_state():
     global dump_reader, HF_PUBLISHER
+    global WD_HF_SCHOLARLY_FILTER
     global TEXT_PROPERTY_FILTER, TEXT_TOKENIZER
     global VECTOR_ITEM_FILTER, VECTOR_EMBEDDER, VECTORCACHE, ASTRADB
 
     dump_reader = None
     HF_PUBLISHER = None
+    WD_HF_SCHOLARLY_FILTER = None
     TEXT_PROPERTY_FILTER = None
     TEXT_TOKENIZER = None
     VECTOR_ITEM_FILTER = None
@@ -325,7 +358,11 @@ def run_wd_to_hf_stage():
     print("Running full Wikidata -> HF pass")
     reset_runtime_state()
     reader = create_dump_reader()
-    counters = STATS_TRACKER.start_counters(("wd_hf_rows",))
+    counters = STATS_TRACKER.start_counters((
+        "wd_hf_rows",
+        "wd_hf_skipped_existing",
+        "wd_hf_skipped_scholarly",
+    ))
     HF_PUBLISHER = WikidataHFDatasetPublisher(
         branch=HF_BRANCH,
         config_path=WD_HF_API_PATH,
