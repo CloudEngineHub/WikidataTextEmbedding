@@ -308,19 +308,29 @@ def create_dump_reader():
 
 
 def resolve_hf_branches_without_dump():
-    global HF_BRANCH, VECTOR_HF_BRANCH
+    global DUMP_DATE, HF_BRANCH, VECTOR_HF_BRANCH
 
+    if not DUMP_DATE and (not HF_BRANCH or not VECTOR_HF_BRANCH):
+        date_file = DUMP_PATH + ".date"
+        if os.path.exists(date_file):
+            with open(date_file) as f:
+                DUMP_DATE = f.read().strip()
+        elif os.path.exists(DUMP_PATH):
+            DUMP_DATE = WikidataDumpReader(DUMP_PATH).get_dump_date()
     if not HF_BRANCH and DUMP_DATE:
         HF_BRANCH = DUMP_DATE.replace("-", "")
     if not VECTOR_HF_BRANCH:
         VECTOR_HF_BRANCH = HF_BRANCH
 
     if SAVE_WD_TO_HF and MERGE_HF_TO_MAIN and not HF_BRANCH:
-        raise ValueError("Set HF_BRANCH when MERGE_HF_TO_MAIN=true and SAVE_WD_TO_HF=true.")
+        raise ValueError("Set HF_BRANCH or DUMP_DATE when MERGE_HF_TO_MAIN=true and SAVE_WD_TO_HF=true.")
     if SAVE_VECTORS_TO_HF and MERGE_HF_TO_MAIN and not VECTOR_HF_BRANCH:
-        raise ValueError("Set VECTOR_HF_BRANCH or HF_BRANCH when MERGE_HF_TO_MAIN=true and SAVE_VECTORS_TO_HF=true.")
+        raise ValueError(
+            "Set VECTOR_HF_BRANCH, HF_BRANCH, or DUMP_DATE when MERGE_HF_TO_MAIN=true "
+            "and SAVE_VECTORS_TO_HF=true."
+        )
 
-    print(f"HF branch: {HF_BRANCH}\n Vector HF branch: {VECTOR_HF_BRANCH}")
+    print(f"Dump date: {DUMP_DATE}\n HF branch: {HF_BRANCH}\n Vector HF branch: {VECTOR_HF_BRANCH}")
 
 
 def reset_runtime_state():
