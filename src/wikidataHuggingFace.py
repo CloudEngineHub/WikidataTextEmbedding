@@ -14,6 +14,7 @@ from huggingface_hub import (
     HfApi,
     hf_hub_download,
 )
+from huggingface_hub.errors import HfHubHTTPError
 import pyarrow as pa
 import pyarrow.parquet as pq
 from src.hfUploadCheckpoint import HFUploadCheckpoint
@@ -88,7 +89,8 @@ class WikidataHFDatasetPublisher:
         ops = [CommitOperationDelete(path_in_repo=f) for f in files if f.startswith("data/")]
 
         if ops:
-            api.create_commit(
+            self._create_commit_with_retry(
+                api,
                 repo_id=self.repo_id,
                 repo_type="dataset",
                 revision=self.branch,
@@ -99,10 +101,39 @@ class WikidataHFDatasetPublisher:
         return True
 
     @staticmethod
+    def _create_commit_with_retry(api: HfApi, **kwargs):
+        sleep_time = 1
+        while True:
+            try:
+                return api.create_commit(**kwargs)
+            except HfHubHTTPError as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None and status_code != 429 and status_code < 500:
+                    raise
+
+                retry_after = None
+                headers = getattr(response, "headers", {}) or {}
+                if "retry-after" in headers:
+                    try:
+                        retry_after = int(headers["retry-after"])
+                    except ValueError:
+                        retry_after = None
+
+                wait_s = max(retry_after or sleep_time, 1)
+                print(f"HF commit failed/rate-limited; retrying in {wait_s} seconds.", flush=True)
+                sleep(wait_s)
+                sleep_time = min(sleep_time * 2, 3600 if status_code == 429 else 30)
+            except Exception:
+                traceback.print_exc()
+                sleep(sleep_time)
+                sleep_time = min(sleep_time * 2, 30)
+
+    @staticmethod
     def merge_to_main(
         branch: str,
         config_path: str = None,
-        batch_size: int = 50,
+        batch_size: int = 1000,
     ) -> dict:
         """
         Make main match a published branch without downloading parquet chunks.
@@ -173,7 +204,8 @@ class WikidataHFDatasetPublisher:
 
         for start in range(0, len(files_to_delete), batch_size):
             batch = files_to_delete[start:start + batch_size]
-            api.create_commit(
+            WikidataHFDatasetPublisher._create_commit_with_retry(
+                api,
                 repo_id=repo_id,
                 repo_type="dataset",
                 revision=target_branch,
@@ -201,7 +233,8 @@ class WikidataHFDatasetPublisher:
                             path_or_fileobj=local_path,
                         )
                     )
-                api.create_commit(
+                WikidataHFDatasetPublisher._create_commit_with_retry(
+                    api,
                     repo_id=repo_id,
                     repo_type="dataset",
                     revision=target_branch,
@@ -212,7 +245,8 @@ class WikidataHFDatasetPublisher:
 
         for start in range(0, len(files_to_copy), batch_size):
             batch = files_to_copy[start:start + batch_size]
-            api.create_commit(
+            WikidataHFDatasetPublisher._create_commit_with_retry(
+                api,
                 repo_id=repo_id,
                 repo_type="dataset",
                 revision=target_branch,

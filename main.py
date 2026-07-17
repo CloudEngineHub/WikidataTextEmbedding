@@ -394,7 +394,7 @@ def run_wd_to_hf_stage():
             "merge_to_main": WikidataHFDatasetPublisher.merge_to_main(
                 branch=HF_BRANCH,
                 config_path=WD_HF_API_PATH,
-                batch_size=HF_BATCH_SIZE,
+                batch_size=HF_CHUNK_SIZE,
             ),
         }
         STATS_TRACKER.set_stage_stats("wd_to_hf", stage_stats)
@@ -539,7 +539,7 @@ def run_vectors_to_hf_stage():
         merge_stats = WikidataHFDatasetPublisher.merge_to_main(
             branch=VECTOR_HF_BRANCH,
             config_path=VECTORS_HF_API_PATH,
-            batch_size=HF_BATCH_SIZE,
+            batch_size=HF_CHUNK_SIZE,
         )
         for lang in languages:
             fallback = os.environ.get(
