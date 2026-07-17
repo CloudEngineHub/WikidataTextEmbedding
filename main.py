@@ -42,6 +42,7 @@ HF_QUEUE_SIZE = int(os.environ.get("HF_QUEUE_SIZE", 128))
 DUMP_DATE = os.environ.get("DUMP_DATE")
 HF_BRANCH = os.environ.get("HF_BRANCH")
 VECTOR_HF_BRANCH = os.environ.get("VECTOR_HF_BRANCH")
+MERGE_HF_TO_MAIN = os.environ.get("MERGE_HF_TO_MAIN", "false").lower() == "true"
 PROPERTY_CONSTRAINT_PIDS = tuple(
     pid.strip() for pid in os.environ.get("PROPERTY_CONSTRAINT_PIDS", "P2302").split(",") if pid.strip()
 )
@@ -190,6 +191,9 @@ def save_vectors_to_hf():
     vector_cache = WikidataVectorCache(lang=LANG, data_dir="./data/Wikidata/")
     total = 0
     for vectors in vector_cache.iter_batches(batch_size=HF_CHUNK_SIZE):
+        existing_ids = HF_PUBLISHER.existing_ids([vector.get("id") for vector in vectors if vector and vector.get("id")])
+        if existing_ids:
+            vectors = [vector for vector in vectors if vector and vector.get("id") not in existing_ids]
         total += HF_PUBLISHER.publish_vector_batch(vectors)
     return total
 
@@ -355,8 +359,8 @@ def run_wd_to_hf_stage():
     global HF_PUBLISHER, STATS_TRACKER
 
     stage_name = "wd_to_hf"
-    print("Running full Wikidata -> HF pass")
     reset_runtime_state()
+    print("Running full Wikidata -> HF pass")
     reader = create_dump_reader()
     counters = STATS_TRACKER.start_counters((
         "wd_hf_rows",
@@ -394,6 +398,12 @@ def run_wd_to_hf_stage():
         "entities_processed": int(reader.iterations.value),
         "handler_errors": int(reader.handler_errors.value),
     })
+    if MERGE_HF_TO_MAIN:
+        stage_stats["merge_to_main"] = WikidataHFDatasetPublisher.merge_to_main(
+            branch=HF_BRANCH,
+            config_path=WD_HF_API_PATH,
+            batch_size=HF_BATCH_SIZE,
+        )
     STATS_TRACKER.set_stage_stats("wd_to_hf", stage_stats)
     STATS_TRACKER.record_error(stage_name, stage_stats["handler_errors"])
 
@@ -520,11 +530,18 @@ def run_vectors_to_hf_stage():
             raise
         finally:
             HF_PUBLISHER.flush()
-        lang_stats["vectors_to_hf"] = {
+        vectors_to_hf_stats = {
             "branch": VECTOR_HF_BRANCH,
             "data_dir": f"{HF_DATA_DIR}/{LANG}",
             "rows_pushed": int(vectors_pushed),
         }
+        if MERGE_HF_TO_MAIN:
+            vectors_to_hf_stats["merge_to_main"] = WikidataHFDatasetPublisher.merge_to_main(
+                branch=VECTOR_HF_BRANCH,
+                config_path=VECTORS_HF_API_PATH,
+                batch_size=HF_BATCH_SIZE,
+            )
+        lang_stats["vectors_to_hf"] = vectors_to_hf_stats
 
 
 def run_pipeline():
@@ -547,6 +564,7 @@ def run_pipeline():
         "save_wd_to_hf": SAVE_WD_TO_HF,
         "save_to_vectordb": SAVE_TO_VECTORDB,
         "save_vectors_to_hf": SAVE_VECTORS_TO_HF,
+        "merge_hf_to_main": MERGE_HF_TO_MAIN,
         "delete_stale_vectors": DELETE_STALE_VECTORS,
         "hf_branch": HF_BRANCH,
         "vector_hf_branch": VECTOR_HF_BRANCH,

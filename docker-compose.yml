@@ -32,6 +32,7 @@ services:
       HF_QUEUE_SIZE: ${HF_QUEUE_SIZE:-128}
       HF_BRANCH: ${HF_BRANCH:-}
       VECTOR_HF_BRANCH: ${VECTOR_HF_BRANCH:-}
+      MERGE_HF_TO_MAIN: ${MERGE_HF_TO_MAIN:-false}
       PROPERTY_CONSTRAINT_PIDS: ${PROPERTY_CONSTRAINT_PIDS:-P2302}
       RUN_STATS_PATH: ${RUN_STATS_PATH:-data/run_stats.json}
       JINA_API_PATH: /workspace/API_tokens/jina_api.json
