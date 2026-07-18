@@ -7,7 +7,14 @@ import tempfile
 from time import sleep
 from multiprocessing import Process, Queue, Value, Lock
 from queue import Full
-from huggingface_hub import HfApi, CommitOperationDelete
+from huggingface_hub import (
+    CommitOperationAdd,
+    CommitOperationCopy,
+    CommitOperationDelete,
+    HfApi,
+    hf_hub_download,
+)
+from huggingface_hub.errors import HfHubHTTPError
 import pyarrow as pa
 import pyarrow.parquet as pq
 from src.hfUploadCheckpoint import HFUploadCheckpoint
@@ -82,7 +89,8 @@ class WikidataHFDatasetPublisher:
         ops = [CommitOperationDelete(path_in_repo=f) for f in files if f.startswith("data/")]
 
         if ops:
-            api.create_commit(
+            self._create_commit_with_retry(
+                api,
                 repo_id=self.repo_id,
                 repo_type="dataset",
                 revision=self.branch,
@@ -91,6 +99,179 @@ class WikidataHFDatasetPublisher:
             )
 
         return True
+
+    @staticmethod
+    def _create_commit_with_retry(api: HfApi, **kwargs):
+        sleep_time = 1
+        while True:
+            try:
+                return api.create_commit(**kwargs)
+            except HfHubHTTPError as exc:
+                response = getattr(exc, "response", None)
+                status_code = getattr(response, "status_code", None)
+                if status_code is not None and status_code != 429 and status_code < 500:
+                    raise
+
+                retry_after = None
+                headers = getattr(response, "headers", {}) or {}
+                if "retry-after" in headers:
+                    try:
+                        retry_after = int(headers["retry-after"])
+                    except ValueError:
+                        retry_after = None
+
+                wait_s = max(retry_after or sleep_time, 1)
+                print(f"HF commit failed/rate-limited; retrying in {wait_s} seconds.", flush=True)
+                sleep(wait_s)
+                sleep_time = min(sleep_time * 2, 3600 if status_code == 429 else 30)
+            except Exception:
+                traceback.print_exc()
+                sleep(sleep_time)
+                sleep_time = min(sleep_time * 2, 30)
+
+    @staticmethod
+    def merge_to_main(
+        branch: str,
+        config_path: str = None,
+        batch_size: int = 1000,
+    ) -> dict:
+        """
+        Make main match a published branch without downloading parquet chunks.
+
+        Parquet files are copied server-side. Regular small files, such as README.md
+        and .gitattributes, are downloaded and uploaded.
+        """
+        target_branch = "main"
+        token = os.environ.get("HF_TOKEN")
+        repo_id = os.environ.get("HF_REPO_ID")
+        if config_path and os.path.exists(config_path):
+            with open(config_path, "r", encoding="utf-8") as f_in:
+                data = json.load(f_in)
+                token = data.get("API_KEY", token)
+                repo_id = data.get("REPO_ID", repo_id)
+
+        if not token:
+            raise ValueError("Hugging Face API token not found.")
+        if not repo_id:
+            raise ValueError("Hugging Face repository ID not found.")
+        if not branch:
+            raise ValueError("Source Hugging Face branch is not set.")
+        if branch == target_branch:
+            print(f"HF branch is already {target_branch}; merge skipped.", flush=True)
+            return {
+                "repo_id": repo_id,
+                "source_branch": branch,
+                "target_branch": target_branch,
+                "files_copied": 0,
+                "files_uploaded": 0,
+                "files_deleted": 0,
+                "commits": 0,
+                "skipped": True,
+            }
+
+        api = HfApi(token=token)
+        source_files = set(api.list_repo_files(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=branch,
+        ))
+        target_files = set(api.list_repo_files(
+            repo_id=repo_id,
+            repo_type="dataset",
+            revision=target_branch,
+        ))
+
+        files_to_delete = sorted(target_files - source_files)
+        files_to_copy = sorted(
+            path
+            for path in source_files
+            if path.endswith(".parquet")
+        )
+        files_to_add = sorted(
+            path
+            for path in source_files
+            if not path.endswith(".parquet")
+        )
+        batch_size = max(1, int(batch_size))
+        commits = 0
+
+        print(
+            f"Merging HF branch {branch} -> {target_branch} "
+            f"{len(files_to_copy)} LFS copies, {len(files_to_add)} small-file uploads, "
+            f"{len(files_to_delete)} deletes",
+            flush=True,
+        )
+
+        for start in range(0, len(files_to_delete), batch_size):
+            batch = files_to_delete[start:start + batch_size]
+            WikidataHFDatasetPublisher._create_commit_with_retry(
+                api,
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision=target_branch,
+                operations=[CommitOperationDelete(path_in_repo=path) for path in batch],
+                commit_message=f"Delete stale files before merging {branch}",
+            )
+            commits += 1
+
+        with tempfile.TemporaryDirectory(prefix="hf_merge_") as tmp_dir:
+            for start in range(0, len(files_to_add), batch_size):
+                batch = files_to_add[start:start + batch_size]
+                operations = []
+                for path in batch:
+                    local_path = hf_hub_download(
+                        repo_id=repo_id,
+                        repo_type="dataset",
+                        revision=branch,
+                        filename=path,
+                        token=token,
+                        local_dir=tmp_dir,
+                    )
+                    operations.append(
+                        CommitOperationAdd(
+                            path_in_repo=path,
+                            path_or_fileobj=local_path,
+                        )
+                    )
+                WikidataHFDatasetPublisher._create_commit_with_retry(
+                    api,
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    revision=target_branch,
+                    operations=operations,
+                    commit_message=f"Merge small files from {branch} into {target_branch}",
+                )
+                commits += 1
+
+        for start in range(0, len(files_to_copy), batch_size):
+            batch = files_to_copy[start:start + batch_size]
+            WikidataHFDatasetPublisher._create_commit_with_retry(
+                api,
+                repo_id=repo_id,
+                repo_type="dataset",
+                revision=target_branch,
+                operations=[
+                    CommitOperationCopy(
+                        src_path_in_repo=path,
+                        path_in_repo=path,
+                        src_revision=branch,
+                    )
+                    for path in batch
+                ],
+                commit_message=f"Merge {branch} into {target_branch}",
+            )
+            commits += 1
+
+        return {
+            "repo_id": repo_id,
+            "source_branch": branch,
+            "target_branch": target_branch,
+            "files_copied": len(files_to_copy),
+            "files_uploaded": len(files_to_add),
+            "files_deleted": len(files_to_delete),
+            "commits": commits,
+            "skipped": False,
+        }
 
     def _next_remote_chunk_idx(self):
         api = HfApi(token=self.token)

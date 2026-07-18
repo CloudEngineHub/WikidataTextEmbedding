@@ -104,6 +104,7 @@ By default, `main.py` reads token/config files from `API_tokens/`:
 | `VECTOR_HF_BRANCH` | `HF_BRANCH` | Branch for vector dataset uploads |
 | `WD_HF_API_PATH` | `./API_tokens/wd_hf_api.json` | WD dataset token/repo config |
 | `VECTORS_HF_API_PATH` | `./API_tokens/vectors_hf_api.json` | Vector dataset token/repo config |
+| `MERGE_HF_TO_MAIN` | `false` | Merge the configured HF branch into `main` instead of publishing chunks |
 
 All languages use the configured vector dataset branch.
 

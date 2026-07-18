@@ -42,6 +42,7 @@ HF_QUEUE_SIZE = int(os.environ.get("HF_QUEUE_SIZE", 128))
 DUMP_DATE = os.environ.get("DUMP_DATE")
 HF_BRANCH = os.environ.get("HF_BRANCH")
 VECTOR_HF_BRANCH = os.environ.get("VECTOR_HF_BRANCH")
+MERGE_HF_TO_MAIN = os.environ.get("MERGE_HF_TO_MAIN", "false").lower() == "true"
 PROPERTY_CONSTRAINT_PIDS = tuple(
     pid.strip() for pid in os.environ.get("PROPERTY_CONSTRAINT_PIDS", "P2302").split(",") if pid.strip()
 )
@@ -190,6 +191,9 @@ def save_vectors_to_hf():
     vector_cache = WikidataVectorCache(lang=LANG, data_dir="./data/Wikidata/")
     total = 0
     for vectors in vector_cache.iter_batches(batch_size=HF_CHUNK_SIZE):
+        existing_ids = HF_PUBLISHER.existing_ids([vector.get("id") for vector in vectors if vector and vector.get("id")])
+        if existing_ids:
+            vectors = [vector for vector in vectors if vector and vector.get("id") not in existing_ids]
         total += HF_PUBLISHER.publish_vector_batch(vectors)
     return total
 
@@ -303,6 +307,32 @@ def create_dump_reader():
     return reader
 
 
+def resolve_hf_branches_without_dump():
+    global DUMP_DATE, HF_BRANCH, VECTOR_HF_BRANCH
+
+    if not DUMP_DATE and (not HF_BRANCH or not VECTOR_HF_BRANCH):
+        date_file = DUMP_PATH + ".date"
+        if os.path.exists(date_file):
+            with open(date_file) as f:
+                DUMP_DATE = f.read().strip()
+        elif os.path.exists(DUMP_PATH):
+            DUMP_DATE = WikidataDumpReader(DUMP_PATH).get_dump_date()
+    if not HF_BRANCH and DUMP_DATE:
+        HF_BRANCH = DUMP_DATE.replace("-", "")
+    if not VECTOR_HF_BRANCH:
+        VECTOR_HF_BRANCH = HF_BRANCH
+
+    if SAVE_WD_TO_HF and MERGE_HF_TO_MAIN and not HF_BRANCH:
+        raise ValueError("Set HF_BRANCH or DUMP_DATE when MERGE_HF_TO_MAIN=true and SAVE_WD_TO_HF=true.")
+    if SAVE_VECTORS_TO_HF and MERGE_HF_TO_MAIN and not VECTOR_HF_BRANCH:
+        raise ValueError(
+            "Set VECTOR_HF_BRANCH, HF_BRANCH, or DUMP_DATE when MERGE_HF_TO_MAIN=true "
+            "and SAVE_VECTORS_TO_HF=true."
+        )
+
+    print(f"Dump date: {DUMP_DATE}\n HF branch: {HF_BRANCH}\n Vector HF branch: {VECTOR_HF_BRANCH}")
+
+
 def reset_runtime_state():
     global dump_reader, HF_PUBLISHER
     global WD_HF_SCHOLARLY_FILTER
@@ -355,8 +385,23 @@ def run_wd_to_hf_stage():
     global HF_PUBLISHER, STATS_TRACKER
 
     stage_name = "wd_to_hf"
-    print("Running full Wikidata -> HF pass")
     reset_runtime_state()
+    if MERGE_HF_TO_MAIN:
+        print(f"Merging Wikidata HF branch {HF_BRANCH} -> main")
+        stage_stats = {
+            "branch": HF_BRANCH,
+            "merged_to_main": True,
+            "merge_to_main": WikidataHFDatasetPublisher.merge_to_main(
+                branch=HF_BRANCH,
+                config_path=WD_HF_API_PATH,
+                batch_size=HF_CHUNK_SIZE,
+            ),
+        }
+        STATS_TRACKER.set_stage_stats("wd_to_hf", stage_stats)
+        STATS_TRACKER.record_error(stage_name, 0)
+        return
+
+    print("Running full Wikidata -> HF pass")
     reader = create_dump_reader()
     counters = STATS_TRACKER.start_counters((
         "wd_hf_rows",
@@ -487,6 +532,33 @@ def run_vectors_to_hf_stage():
     languages = WD_LANGS or (LANG,)
     default_fallback = os.environ.get("FALLBACK_LANG", FALLBACK_LANG)
 
+    if MERGE_HF_TO_MAIN:
+        reset_runtime_state()
+        stage_name = "vectors_to_hf"
+        print(f"Merging vector HF branch {VECTOR_HF_BRANCH} -> main")
+        merge_stats = WikidataHFDatasetPublisher.merge_to_main(
+            branch=VECTOR_HF_BRANCH,
+            config_path=VECTORS_HF_API_PATH,
+            batch_size=HF_CHUNK_SIZE,
+        )
+        for lang in languages:
+            fallback = os.environ.get(
+                f"FALLBACK_LANG_{lang.upper()}",
+                default_fallback or lang,
+            )
+            lang_stats = STATS_TRACKER.get_language_stats(lang, {
+                "language": lang,
+                "fallback_lang": fallback,
+                "vector_hf_branch": VECTOR_HF_BRANCH,
+            })
+            lang_stats["vectors_to_hf"] = {
+                "branch": VECTOR_HF_BRANCH,
+                "merged_to_main": True,
+                "merge_to_main": merge_stats,
+            }
+        STATS_TRACKER.record_error(stage_name, 0)
+        return
+
     for lang in languages:
         fallback = os.environ.get(
             f"FALLBACK_LANG_{lang.upper()}",
@@ -520,17 +592,26 @@ def run_vectors_to_hf_stage():
             raise
         finally:
             HF_PUBLISHER.flush()
-        lang_stats["vectors_to_hf"] = {
+        vectors_to_hf_stats = {
             "branch": VECTOR_HF_BRANCH,
             "data_dir": f"{HF_DATA_DIR}/{LANG}",
             "rows_pushed": int(vectors_pushed),
         }
+        lang_stats["vectors_to_hf"] = vectors_to_hf_stats
 
 
 def run_pipeline():
     global STATS_TRACKER
 
-    create_dump_reader()
+    if (
+        SAVE_LABELS
+        or SAVE_TO_VECTORDB
+        or DELETE_STALE_VECTORS
+        or ((SAVE_WD_TO_HF or SAVE_VECTORS_TO_HF) and not MERGE_HF_TO_MAIN)
+    ):
+        create_dump_reader()
+    else:
+        resolve_hf_branches_without_dump()
 
     stats_config = {
         "dump_path": DUMP_PATH,
@@ -547,6 +628,7 @@ def run_pipeline():
         "save_wd_to_hf": SAVE_WD_TO_HF,
         "save_to_vectordb": SAVE_TO_VECTORDB,
         "save_vectors_to_hf": SAVE_VECTORS_TO_HF,
+        "merge_hf_to_main": MERGE_HF_TO_MAIN,
         "delete_stale_vectors": DELETE_STALE_VECTORS,
         "hf_branch": HF_BRANCH,
         "vector_hf_branch": VECTOR_HF_BRANCH,
