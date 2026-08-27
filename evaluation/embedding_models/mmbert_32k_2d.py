@@ -1,4 +1,4 @@
-"""Local Transformers adapter for BAAI BGE-M3 dense embeddings."""
+"""Local Transformers adapter for mmBERT 32K 2D."""
 
 from __future__ import annotations
 
@@ -10,12 +10,12 @@ from transformers import AutoModel, AutoTokenizer
 from .base import EmbeddingModel, Role
 
 
-class BGEM3(EmbeddingModel):
-    """Embed queries and documents with BAAI/bge-m3's dense representation."""
+class MMBERT32K2D(EmbeddingModel):
+    """Embed text with mmBERT 32K 2D at full depth and width."""
 
-    key = "bge-m3"
-    output_folder = "bge-m3"
-    repository = "BAAI/bge-m3"
+    key = "mmbert-32k-2d"
+    output_folder = "mmbert-32k-2d"
+    repository = "llm-semantic-router/mmbert-embed-32k-2d-matryoshka"
 
     def __init__(self):
         """Download the model if needed and load it on the best local device."""
@@ -25,6 +25,7 @@ class BGEM3(EmbeddingModel):
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
         self.model = AutoModel.from_pretrained(
             model_path,
+            trust_remote_code=True,
             torch_dtype=torch.float32,
         )
         self.model.to(self.device)
@@ -35,11 +36,11 @@ class BGEM3(EmbeddingModel):
         query_embedding: np.ndarray,
         candidate_embeddings: np.ndarray,
     ) -> np.ndarray:
-        """Calculate similarity between normalized dense vectors with a dot product."""
+        """Calculate similarity between normalized embeddings with a dot product."""
         return candidate_embeddings @ query_embedding
 
     def embed(self, texts: list[str], roles: list[Role]) -> np.ndarray:
-        """Embed a batch using normalized CLS pooling as specified by BGE-M3."""
+        """Embed a batch using normalized attention-mask mean pooling."""
         self.validate_batch(texts, roles)
         if not texts:
             return np.empty((0, self.model.config.hidden_size), dtype=np.float32)
@@ -52,6 +53,8 @@ class BGEM3(EmbeddingModel):
         )
         tokenized = {name: tensor.to(self.device) for name, tensor in tokenized.items()}
         with torch.inference_mode():
-            embeddings = self.model(**tokenized).last_hidden_state[:, 0]
+            hidden_states = self.model(**tokenized).last_hidden_state
+            attention_mask = tokenized["attention_mask"].unsqueeze(-1).to(hidden_states.dtype)
+            embeddings = (hidden_states * attention_mask).sum(dim=1) / attention_mask.sum(dim=1).clamp(min=1e-9)
             embeddings = functional.normalize(embeddings, p=2, dim=1)
         return embeddings.float().cpu().numpy()
